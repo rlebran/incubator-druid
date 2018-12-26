@@ -26,6 +26,14 @@
     <name>druid-pubsub</name>
     <description>druid-pubsub</description>
 
+    <!--<repositories>
+        <repository>
+            <id>sonatype-oss</id>
+            <name>Sonatype OSS Snapshots</name>
+            <url>https://oss.sonatype.org/content/repositories/snapshots</url>
+        </repository>
+    </repositories>-->
+
     <parent>
         <groupId>org.apache.druid</groupId>
         <artifactId>druid</artifactId>
@@ -69,6 +77,12 @@
             <groupId>com.google.cloud</groupId>
             <artifactId>google-cloud-pubsub</artifactId>
             <version>1.56.0</version>
+        </dependency>
+
+        <dependency>
+            <groupId>com.fasterxml.jackson.module</groupId>
+            <artifactId>jackson-module-scala_2.12</artifactId>
+            <version>2.9.8</version>
         </dependency>
 
         <!-- Tests -->

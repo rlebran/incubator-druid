@@ -2,6 +2,7 @@ package org.apache.druid.firehose.pubsub
 
 import java.io.File
 
+import com.fasterxml.jackson.annotation.{JsonCreator, JsonProperty}
 import com.google.cloud.pubsub.v1.stub.{GrpcSubscriberStub, SubscriberStubSettings}
 import com.google.pubsub.v1._
 import com.typesafe.scalalogging.LazyLogging
@@ -9,13 +10,15 @@ import org.apache.druid.data.input.impl.InputRowParser
 import org.apache.druid.data.input.{Firehose, FirehoseFactory, InputRow}
 
 import scala.collection.mutable
+import scala.collection.mutable.ArrayBuffer
 
-//@todo pass a pubsub config object instead of sub + batch size ?
+@JsonCreator
 class PubsubFirehoseFactory(
-                             subscription: String,
-                             batchSize: Int
+                             @JsonProperty("config") pubsubConfig: PubsubFirehoseConfig
                            ) extends FirehoseFactory[InputRowParser[PubsubMessage]]
   with LazyLogging {
+
+  def config(): PubsubFirehoseConfig = pubsubConfig
 
   override def connect(
                         parser: InputRowParser[PubsubMessage],
@@ -33,45 +36,50 @@ class PubsubFirehoseFactory(
 
     val pullRequest = PullRequest
       .newBuilder
-      .setMaxMessages(batchSize)
+      .setMaxMessages(pubsubConfig.batchNumber)
       .setReturnImmediately(true)
-      .setSubscription(subscription)
+      .setSubscription(pubsubConfig.subscription)
       .build
 
     new Firehose {
-      //@todo switch from stack to list (assigned to var ?)
+
       import scala.collection.JavaConverters._
 
-      private val pubsubResponse = mutable.Stack[PullResponse]()
+      private val responsesBuffer: mutable.ArrayBuffer[ReceivedMessage] = ArrayBuffer[ReceivedMessage]()
 
       /**
         * Pull messages from pubsub if and only if the lccal pubsub response buffer is empty
         */
       override def hasMore: Boolean = {
-        if (pubsubResponse.nonEmpty) true
+        if (responsesBuffer.nonEmpty) true
         else pullMessage.nonEmpty
       }
 
       override def nextRow(): InputRow = {
         logger.debug("Getting next pubsub message")
-        receivedMessageFromPullResponse(pubsubResponse.top)
+        responsesBuffer
+          .headOption
           .map(_.getMessage)
           .flatMap(parser.parseBatch(_).asScala)
           .headOption
           .orNull
       }
 
+      /**
+        * Send an ack request for all the messages previously pulled
+        */
       override def commit(): Runnable = {
         () => {
-          val ackId = receivedMessageFromPullResponse(pubsubResponse.pop)
+          val ackId = responsesBuffer
             .map(_.getAckId)
-            .toIterable
-            .asJava
           val ackRequest = AcknowledgeRequest
             .newBuilder
-            .setSubscription(subscription)
-            .addAllAckIds(ackId)
+            .setSubscription(pubsubConfig.subscription)
+            .addAllAckIds(ackId.asJava)
             .build
+
+          // Clear the response buffer. All elements should have been process at this stage
+          responsesBuffer.clear()
 
           logger.debug(s"Sending ack request $ackRequest for id $ackId")
           pubsubSubscriber.acknowledgeCallable()
@@ -84,18 +92,19 @@ class PubsubFirehoseFactory(
         pubsubSubscriber.close()
       }
 
-      private def pullMessage = {
-        logger.debug(s"Pulling $batchSize message(s) from pubsub sub: $subscription")
-        val response = pubsubSubscriber.pullCallable
+      private def pullMessage: ArrayBuffer[ReceivedMessage] = {
+        logger.debug(s"Pulling ${pubsubConfig.batchNumber} message(s) from pubsub sub: ${pubsubConfig.subscription}")
+        val response = pubsubSubscriber
+          .pullCallable
           .call(pullRequest)
-        pubsubResponse.push(response)
+        responsesBuffer ++= receivedMessageFromPullResponse(response)
+        responsesBuffer
       }
 
-      private def receivedMessageFromPullResponse(pullResponse: PullResponse): Option[ReceivedMessage] = {
+      private def receivedMessageFromPullResponse(pullResponse: PullResponse): Seq[ReceivedMessage] = {
         pullResponse
           .getReceivedMessagesList
           .asScala
-          .headOption
       }
     }
   }
